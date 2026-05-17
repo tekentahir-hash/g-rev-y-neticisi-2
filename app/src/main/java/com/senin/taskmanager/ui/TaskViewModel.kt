@@ -7,9 +7,7 @@ import com.senin.taskmanager.notification.scheduleNotification
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import java.time.DayOfWeek
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 
 class TaskViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = TaskDatabase.getDatabase(application).taskDao()
@@ -20,8 +18,7 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSelectedDate(date: LocalDate) { _selectedDate.value = date }
 
-    fun getTasksForDate(date: LocalDate) =
-        dao.getTasksForDate(date.toString())
+    fun getTasksForDate(date: LocalDate) = dao.getTasksForDate(date.toString())
 
     val allTasks = dao.getAllTasks()
     val recurringTasks = dao.getRecurringTasks()
@@ -36,76 +33,64 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             val dayOfWeek = if (freq == TaskFrequency.WEEKLY) dueDate.dayOfWeek.value else null
-            val id = dao.insertTask(
-                Task(
-                    title = title,
-                    description = desc,
-                    frequency = freq,
-                    priority = prio,
-                    dueDate = dueDate.toString(),
-                    dueTime = dueTime,
-                    dayOfWeek = dayOfWeek
+
+            if (freq == TaskFrequency.ONCE) {
+                // Tek seferlik: sadece o güne ekle
+                val id = dao.insertTask(
+                    Task(
+                        title = title, description = desc, frequency = freq,
+                        priority = prio, dueDate = dueDate.toString(),
+                        dueTime = dueTime, dayOfWeek = dayOfWeek
+                    )
                 )
-            )
-            // Bildirim planla
-            if (dueTime != null) {
-                scheduleNotification(app, id.toInt(), title, dueDate.toString(), dueTime)
+                if (dueTime != null) scheduleNotification(app, id.toInt(), title, dueDate.toString(), dueTime)
+            } else {
+                // Tekrarlı: eklendiği andan itibaren 365 gün ileriye tüm tarihlere otomatik ekle
+                var current = dueDate
+                val endDate = dueDate.plusDays(365)
+                while (!current.isAfter(endDate)) {
+                    val id = dao.insertTask(
+                        Task(
+                            title = title, description = desc, frequency = freq,
+                            priority = prio, dueDate = current.toString(),
+                            dueTime = dueTime, dayOfWeek = dayOfWeek
+                        )
+                    )
+                    if (dueTime != null) scheduleNotification(app, id.toInt(), title, current.toString(), dueTime)
+                    current = nextDate(current, freq)
+                }
             }
         }
     }
 
+    // Tik atılınca tamamlandı/geri al — görev silinmez, üstü çizilir
     fun toggleComplete(task: Task) {
         viewModelScope.launch {
-            if (!task.isCompleted) {
-                // Tamamlandı olarak işaretle
-                dao.updateTask(task.copy(isCompleted = true))
-                // Tekrarlı ise bir sonraki görevi oluştur
-                if (task.frequency != TaskFrequency.ONCE) {
-                    val nextDate = nextDueDate(task)
-                    val newTask = task.copy(
-                        id = 0,
-                        dueDate = nextDate.toString(),
-                        isCompleted = false
-                    )
-                    val newId = dao.insertTask(newTask)
-                    if (task.dueTime != null) {
-                        scheduleNotification(app, newId.toInt(), task.title, nextDate.toString(), task.dueTime)
-                    }
-                }
-            } else {
-                // Geri al
-                dao.updateTask(task.copy(isCompleted = false))
-            }
+            dao.updateTask(task.copy(isCompleted = !task.isCompleted))
         }
     }
 
+    // Sil butonuna basılınca gerçekten sil
     fun deleteTask(task: Task) {
         viewModelScope.launch { dao.softDelete(task.id) }
     }
 
+    // Uygulama açılışında: dünden kalan tamamlanmamış görevleri bugüne taşı
     fun rolloverOverdue() {
         viewModelScope.launch {
             val today = LocalDate.now()
             val overdue = dao.getOverdueTasks(today.toString())
             overdue.forEach { task ->
-                val next = nextDueDate(task, today)
-                dao.updateTask(task.copy(dueDate = next.toString()))
+                dao.updateTask(task.copy(dueDate = today.toString()))
             }
         }
     }
 
-    private fun nextDueDate(task: Task, from: LocalDate = LocalDate.now()): LocalDate {
-        return when (task.frequency) {
-            TaskFrequency.DAILY        -> from.plusDays(1)
-            TaskFrequency.EVERY_2_DAYS -> from.plusDays(2)
-            TaskFrequency.EVERY_3_DAYS -> from.plusDays(3)
-            TaskFrequency.WEEKLY -> {
-                val dow = task.dayOfWeek ?: from.dayOfWeek.value
-                var next = from.plusDays(1)
-                while (next.dayOfWeek.value != dow) next = next.plusDays(1)
-                next
-            }
-            TaskFrequency.ONCE -> from
-        }
+    private fun nextDate(from: LocalDate, freq: TaskFrequency): LocalDate = when (freq) {
+        TaskFrequency.DAILY        -> from.plusDays(1)
+        TaskFrequency.EVERY_2_DAYS -> from.plusDays(2)
+        TaskFrequency.EVERY_3_DAYS -> from.plusDays(3)
+        TaskFrequency.WEEKLY       -> from.plusDays(7)
+        TaskFrequency.ONCE         -> from
     }
 }
